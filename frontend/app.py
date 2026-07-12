@@ -259,23 +259,48 @@ def gql(query: str, variables: dict = None) -> dict:
     payload = {"query": query}
     if variables:
         payload["variables"] = variables
+    
+    headers = {}
+    if st.session_state.get("token"):
+        headers["Authorization"] = f"Bearer {st.session_state['token']}"
+        
     try:
-        resp = httpx.post(API_URL, json=payload, timeout=15)
+        resp = httpx.post(API_URL, json=payload, headers=headers, timeout=15)
         resp.raise_for_status()
         data = resp.json()
         if "errors" in data:
-            st.error(f"GraphQL error: {data['errors']}")
+            error_msg = data["errors"][0].get("message", "Unknown error occurred.")
+            st.error(f"{error_msg}")
             return {}
         return data.get("data", {})
     except httpx.ConnectError:
         st.error(
-            "⚠️ Cannot connect to backend. "
+            "Cannot connect to backend. "
             "Make sure FastAPI is running:  `uvicorn backend.main:app --reload`"
         )
         return {}
     except Exception as exc:
         st.error(f"Request failed: {exc}")
         return {}
+
+
+LOGIN_MUTATION = """
+mutation Login($username: String!, $password: String!) {
+  login(username: $username, password: $password) {
+    token
+    user { id username role }
+  }
+}
+"""
+
+REGISTER_MUTATION = """
+mutation Register($username: String!, $password: String!, $role: String!) {
+  register(username: $username, password: $password, role: $role) {
+    token
+    user { id username role }
+  }
+}
+"""
 
 
 STORIES_QUERY = """
@@ -333,14 +358,118 @@ if "selected_story_id" not in st.session_state:
     st.session_state.selected_story_id = None
 if "refresh_key" not in st.session_state:
     st.session_state.refresh_key = 0
+if "token" not in st.session_state:
+    st.session_state.token = None
+if "user" not in st.session_state:
+    st.session_state.user = None
+if "status_filter" not in st.session_state:
+    st.session_state.status_filter = None
+
+# ─── Live Analytics Widget ──────────────────────────────────────────────────
+def render_analytics_widget():
+    # Only fetch stats if logged in
+    if not st.session_state.get("token"):
+        return
+        
+    # We run a quick query just to get statuses
+    stats_query = "{ stories { status } }"
+    data = gql(stats_query)
+    stories_list = data.get("stories", [])
+    
+    st.markdown("### Analytics")
+    if not stories_list:
+        st.write("No data yet.")
+        return
+        
+    counts = {
+        "Clarifying": sum(1 for s in stories_list if s["status"] == "Clarifying"),
+        "Green_Light": sum(1 for s in stories_list if s["status"] == "Green_Light"),
+        "Accepted": sum(1 for s in stories_list if s["status"] == "Accepted"),
+        "Draft": sum(1 for s in stories_list if s["status"] == "Draft"),
+    }
+    
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button(f"Clarifying: {counts['Clarifying']}", use_container_width=True, type="primary" if st.session_state.status_filter == "Clarifying" else "secondary"):
+            st.session_state.status_filter = "Clarifying"
+            st.rerun()
+        if st.button(f"Accepted: {counts['Accepted']}", use_container_width=True, type="primary" if st.session_state.status_filter == "Accepted" else "secondary"):
+            st.session_state.status_filter = "Accepted"
+            st.rerun()
+    with c2:
+        if st.button(f"Green Light: {counts['Green_Light']}", use_container_width=True, type="primary" if st.session_state.status_filter == "Green_Light" else "secondary"):
+            st.session_state.status_filter = "Green_Light"
+            st.rerun()
+        if st.button(f"Draft: {counts['Draft']}", use_container_width=True, type="primary" if st.session_state.status_filter == "Draft" else "secondary"):
+            st.session_state.status_filter = "Draft"
+            st.rerun()
+            
+    if st.session_state.status_filter:
+        if st.button("Clear Filter", use_container_width=True):
+            st.session_state.status_filter = None
+            st.rerun()
+    st.divider()
+
+
+# ─── Login Screen ─────────────────────────────────────────────────────────────
+def render_login_screen():
+    st.markdown("<h1 style='text-align:center'>AI Factory Login</h1>", unsafe_allow_html=True)
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    c1, c2, c3 = st.columns([1, 1, 1])
+    with c2:
+        tab1, tab2 = st.tabs(["Login", "Register"])
+        
+        with tab1:
+            with st.form("login_form"):
+                username = st.text_input("Username")
+                password = st.text_input("Password", type="password")
+                submitted = st.form_submit_button("Login", use_container_width=True)
+                if submitted:
+                    res = gql(LOGIN_MUTATION, {"username": username, "password": password})
+                    if res and res.get("login"):
+                        st.session_state.token = res["login"]["token"]
+                        st.session_state.user = res["login"]["user"]
+                        st.rerun()
+                        
+        with tab2:
+            with st.form("register_form"):
+                reg_username = st.text_input("Username")
+                reg_password = st.text_input("Password", type="password")
+                reg_role = st.selectbox("Role", ["PM", "Engineer", "Admin"])
+                reg_submit = st.form_submit_button("Register", use_container_width=True)
+                if reg_submit:
+                    res = gql(REGISTER_MUTATION, {"username": reg_username, "password": reg_password, "role": reg_role})
+                    if res and res.get("register"):
+                        st.session_state.token = res["register"]["token"]
+                        st.session_state.user = res["register"]["user"]
+                        st.rerun()
 
 # ─── Sidebar: Create Story ────────────────────────────────────────────────────
+
+if not st.session_state.get("token"):
+    render_login_screen()
+    st.stop()
 
 with st.sidebar:
     st.markdown("## AI Factory")
     st.markdown("*Tracer Bullet POC*")
+    
+    # User Profile
+    user = st.session_state.user
+    st.markdown(f"**👤 {user['username']}** (`{user['role']}`)")
+    if st.button("Logout", use_container_width=True):
+        st.session_state.token = None
+        st.session_state.user = None
+        st.rerun()
+
     st.divider()
-    st.markdown("### New Story")
+    
+    # Analytics Widget
+    render_analytics_widget()
+
+    if user["role"] == "PM":
+        st.markdown("### New Story")
 
     with st.form("create_story_form", clear_on_submit=True):
         new_title = st.text_input("Title", placeholder="e.g. User Auth Flow")
@@ -391,6 +520,9 @@ with col_refresh:
 _ = st.session_state.refresh_key  # consume key to force re-render
 data = gql(STORIES_QUERY)
 stories = data.get("stories", [])
+
+if st.session_state.status_filter:
+    stories = [s for s in stories if s["status"] == st.session_state.status_filter]
 
 if not stories:
     st.markdown(
@@ -620,7 +752,7 @@ else:
         else:
             for c in comments:
                 css_class = "comment-pm" if c["author"] == "PM" else "comment-agent"
-                author_label = "PM" if c["author"] == "PM" else "Agent"
+                author_label = c["author"]
                 # Format timestamp if available
                 ts_str = ""
                 if c.get("createdAt"):

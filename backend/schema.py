@@ -11,18 +11,60 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Any
 
 import strawberry
+from strawberry.types import Info
 from strawberry.fastapi import GraphQLRouter
+from fastapi import Request
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from backend.database import AsyncSessionLocal
-from backend.models import Story, Comment
+from backend.models import Story, Comment, User
 from backend.workflow.graph import workflow_graph
 from backend.workflow.state import GraphState
+from backend.auth import decode_access_token
 
+
+# ---------------------------------------------------------------------------
+# Context
+# ---------------------------------------------------------------------------
+
+async def get_context(request: Request):
+    user = None
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header.split(" ")[1]
+        payload = decode_access_token(token)
+        if payload and "sub" in payload:
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    select(User).where(User.id == payload["sub"])
+                )
+                user = result.scalar_one_or_none()
+    return {"user": user}
+
+
+# ---------------------------------------------------------------------------
+# Permissions
+# ---------------------------------------------------------------------------
+class IsAuthenticated(strawberry.BasePermission):
+    message = "User is not authenticated"
+    async def has_permission(self, source: Any, info: Info, **kwargs) -> bool:
+        return info.context.get("user") is not None
+
+class IsPM(strawberry.BasePermission):
+    message = "Only Product Managers can perform this action"
+    async def has_permission(self, source: Any, info: Info, **kwargs) -> bool:
+        user = info.context.get("user")
+        return user is not None and user.role == "PM"
+
+class IsAdminOrPM(strawberry.BasePermission):
+    message = "Only Admins or PMs can perform this action"
+    async def has_permission(self, source: Any, info: Info, **kwargs) -> bool:
+        user = info.context.get("user")
+        return user is not None and user.role in ("Admin", "PM")
 
 # ---------------------------------------------------------------------------
 # Strawberry output types
@@ -44,6 +86,19 @@ class StoryType:
     description: str
     status: str
     comments: List[CommentType]
+
+
+@strawberry.type
+class UserType:
+    id: str
+    username: str
+    role: str
+
+
+@strawberry.type
+class AuthResponse:
+    token: str
+    user: UserType
 
 
 # ---------------------------------------------------------------------------
@@ -103,10 +158,37 @@ class Query:
 # ---------------------------------------------------------------------------
 # Mutations
 # ---------------------------------------------------------------------------
+from backend.auth import get_password_hash, verify_password, create_access_token
 
 @strawberry.type
 class Mutation:
     @strawberry.mutation
+    async def register(self, username: str, password: str, role: str) -> AuthResponse:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(select(User).where(User.username == username))
+            if result.scalars().first():
+                raise ValueError("Username already taken")
+            user = User(
+                username=username,
+                password_hash=get_password_hash(password),
+                role=role
+            )
+            session.add(user)
+            await session.commit()
+            token = create_access_token({"sub": user.id, "role": user.role})
+            return AuthResponse(token=token, user=UserType(id=user.id, username=user.username, role=user.role))
+
+    @strawberry.mutation
+    async def login(self, username: str, password: str) -> AuthResponse:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(select(User).where(User.username == username))
+            user = result.scalars().first()
+            if not user or not verify_password(password, user.password_hash):
+                raise ValueError("Invalid credentials")
+            token = create_access_token({"sub": user.id, "role": user.role})
+            return AuthResponse(token=token, user=UserType(id=user.id, username=user.username, role=user.role))
+
+    @strawberry.mutation(permission_classes=[IsPM])
     async def create_story(self, title: str, description: str) -> StoryType:
         """Insert a new Story with Draft status."""
         async with AsyncSessionLocal() as session:
@@ -170,11 +252,14 @@ class Mutation:
             # Persist: update story status
             story.status = final_state["status"]
 
+            # Determine which agent spoke based on the final status
+            main_agent_name = "Clarifier" if final_state["status"] == "Clarifying" else "PRD Writer"
+            
             # Persist: add the agent comment
             agent_comment = Comment(
                 id=str(uuid.uuid4()),
                 story_id=story.id,
-                author="Agent",
+                author=main_agent_name,
                 text=final_state["latest_comment"],
             )
             session.add(agent_comment)
@@ -184,7 +269,7 @@ class Mutation:
                 prd_comment = Comment(
                     id=str(uuid.uuid4()),
                     story_id=story.id,
-                    author="Agent",
+                    author="PRD Writer",
                     text=final_state["prd_content"],
                 )
                 session.add(prd_comment)
@@ -195,7 +280,7 @@ class Mutation:
             updated = await _get_story_with_comments(session, story.id)
             return _story_to_type(updated)
 
-    @strawberry.mutation
+    @strawberry.mutation(permission_classes=[IsPM])
     async def submit_clarification(self, story_id: str, text: str) -> StoryType:
         """
         Post a PM clarification answer or PRD revision as a comment.
@@ -228,7 +313,7 @@ class Mutation:
             updated = await _get_story_with_comments(session, story_id)
             return _story_to_type(updated)
 
-    @strawberry.mutation
+    @strawberry.mutation(permission_classes=[IsAdminOrPM])
     async def accept_story(self, story_id: str) -> StoryType:
         """Manually transition a story from Green_Light to Accepted."""
         async with AsyncSessionLocal() as session:
@@ -243,7 +328,7 @@ class Mutation:
             updated = await _get_story_with_comments(session, story_id)
             return _story_to_type(updated)
 
-    @strawberry.mutation
+    @strawberry.mutation(permission_classes=[IsAdminOrPM])
     async def delete_story(self, story_id: str) -> bool:
         """Delete a story and all its associated comments."""
         async with AsyncSessionLocal() as session:
@@ -262,4 +347,4 @@ class Mutation:
 # ---------------------------------------------------------------------------
 
 schema = strawberry.Schema(query=Query, mutation=Mutation)
-graphql_router = GraphQLRouter(schema, graphql_ide="graphiql")
+graphql_router = GraphQLRouter(schema, context_getter=get_context, graphql_ide="graphiql")

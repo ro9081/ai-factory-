@@ -23,6 +23,23 @@ class CommentAuthor(str, enum.Enum):
     Agent = "Agent"
 
 
+class UserRole(str, enum.Enum):
+    PM = "PM"
+    Engineer = "Engineer"
+    Admin = "Admin"
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    username: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False, default=UserRole.PM.value)
+
+
 class Story(Base):
     __tablename__ = "stories"
 
