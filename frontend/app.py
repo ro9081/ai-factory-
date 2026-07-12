@@ -426,11 +426,17 @@ def render_login_screen():
                 password = st.text_input("Password", type="password")
                 submitted = st.form_submit_button("Login", use_container_width=True)
                 if submitted:
-                    res = gql(LOGIN_MUTATION, {"username": username, "password": password})
-                    if res and res.get("login"):
-                        st.session_state.token = res["login"]["token"]
-                        st.session_state.user = res["login"]["user"]
-                        st.rerun()
+                    username_clean = username.strip() if username else ""
+                    if not username_clean or not password:
+                        st.error("Username and password are required.")
+                    elif len(password) < 8:
+                        st.error("Password must be at least 8 characters long.")
+                    else:
+                        res = gql(LOGIN_MUTATION, {"username": username_clean, "password": password})
+                        if res and res.get("login"):
+                            st.session_state.token = res["login"]["token"]
+                            st.session_state.user = res["login"]["user"]
+                            st.rerun()
                         
         with tab2:
             with st.form("register_form"):
@@ -439,11 +445,17 @@ def render_login_screen():
                 reg_role = st.selectbox("Role", ["PM", "Engineer", "Admin"])
                 reg_submit = st.form_submit_button("Register", use_container_width=True)
                 if reg_submit:
-                    res = gql(REGISTER_MUTATION, {"username": reg_username, "password": reg_password, "role": reg_role})
-                    if res and res.get("register"):
-                        st.session_state.token = res["register"]["token"]
-                        st.session_state.user = res["register"]["user"]
-                        st.rerun()
+                    reg_username_clean = reg_username.strip() if reg_username else ""
+                    if not reg_username_clean or not reg_password:
+                        st.error("Username and password are required.")
+                    elif len(reg_password) < 8:
+                        st.error("Password must be at least 8 characters long.")
+                    else:
+                        res = gql(REGISTER_MUTATION, {"username": reg_username_clean, "password": reg_password, "role": reg_role})
+                        if res and res.get("register"):
+                            st.session_state.token = res["register"]["token"]
+                            st.session_state.user = res["register"]["user"]
+                            st.rerun()
 
 # ─── Sidebar: Create Story ────────────────────────────────────────────────────
 

@@ -164,6 +164,11 @@ from backend.auth import get_password_hash, verify_password, create_access_token
 class Mutation:
     @strawberry.mutation
     async def register(self, username: str, password: str, role: str) -> AuthResponse:
+        username = username.strip() if username else ""
+        if not username or not password:
+            raise ValueError("Username and password are required")
+        if len(password) < 8:
+            raise ValueError("Password must be at least 8 characters long")
         async with AsyncSessionLocal() as session:
             result = await session.execute(select(User).where(User.username == username))
             if result.scalars().first():
@@ -180,6 +185,11 @@ class Mutation:
 
     @strawberry.mutation
     async def login(self, username: str, password: str) -> AuthResponse:
+        username = username.strip() if username else ""
+        if not username or not password:
+            raise ValueError("Username and password are required")
+        if len(password) < 8:
+            raise ValueError("Password must be at least 8 characters long")
         async with AsyncSessionLocal() as session:
             result = await session.execute(select(User).where(User.username == username))
             user = result.scalars().first()
